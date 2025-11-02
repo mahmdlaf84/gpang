@@ -25,6 +25,7 @@ from sky.clouds.nebius import Nebius
 from sky.clouds.oci import OCI
 from sky.clouds.paperspace import Paperspace
 from sky.clouds.runpod import RunPod
+from sky.clouds.spheron import Spheron
 from sky.clouds.scp import SCP
 from sky.clouds.tencent import Tencent
 from sky.clouds.vast import Vast
@@ -44,6 +45,7 @@ __all__ = [
     'Paperspace',
     'SCP',
     'RunPod',
+    'Spheron',
     'Tencent',
     'Vast',
     'OCI',
