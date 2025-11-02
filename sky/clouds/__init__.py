@@ -11,6 +11,7 @@ from sky.clouds.cloud import Zone
 
 # NOTE: import the above first to avoid circular imports.
 # isort: split
+from sky.clouds.aliyun import Aliyun
 from sky.clouds.aws import AWS
 from sky.clouds.azure import Azure
 from sky.clouds.cudo import Cudo
@@ -25,12 +26,15 @@ from sky.clouds.oci import OCI
 from sky.clouds.paperspace import Paperspace
 from sky.clouds.runpod import RunPod
 from sky.clouds.scp import SCP
+from sky.clouds.tencent import Tencent
 from sky.clouds.vast import Vast
+from sky.clouds.volcengine import Volcengine
 from sky.clouds.vsphere import Vsphere
 
 __all__ = [
     'IBM',
     'AWS',
+    'Aliyun',
     'Azure',
     'Cloud',
     'Cudo',
@@ -40,8 +44,10 @@ __all__ = [
     'Paperspace',
     'SCP',
     'RunPod',
+    'Tencent',
     'Vast',
     'OCI',
+    'Volcengine',
     'Vsphere',
     'Kubernetes',
     'CloudImplementationFeatures',
