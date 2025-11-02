@@ -168,9 +168,63 @@ The JSON format supports rich metadata. Each entry may contain a
          "public_ip": "52.16.0.22",
          "internal_ip": "10.54.0.8",
          "metadata": {"region": "eu-west"}
+   }
+  ]
+}
+
+
+Registering nodes with an external inventory service
+----------------------------------------------------
+
+If you maintain a centralized inventory or scheduling service, you can push
+the discovered node metadata to it using ``sky local register-nodes``. The
+command reuses the same ``--ips``/``--discovery`` options to locate machines,
+connects to each host over SSH, collects networking details (interfaces,
+internal IPs, hostnames) as well as GPU information (model names and reported
+memory), and POSTs the resulting payload to a user-specified HTTP endpoint.
+
+.. code-block:: bash
+
+   sky local register-nodes \
+     --discovery https://inventory.example.com/candidates \
+     --ssh-user ops \
+     --ssh-key-path ~/.ssh/id_rsa \
+     --register-url https://inventory.example.com/api/v1/nodes/register \
+     --register-token "$INVENTORY_TOKEN" \
+     --metadata environment=production --metadata provider=colo
+
+The payload looks like:
+
+.. code-block:: json
+
+   {
+     "cluster": {
+       "generated_at": "2024-04-02T12:10:00Z",
+       "entrypoint": "sky local register-nodes",
+       "skypilot_version": "1.0.0-dev0",
+       "metadata": {
+         "environment": "production",
+         "provider": "colo"
+       }
+     },
+     "nodes": [
+       {
+         "public_ip": "203.0.113.10",
+         "internal_ip": "10.10.0.12",
+         "hostname": "rack-a-gpu-01",
+         "role": "head",
+         "network": [{
+           "name": "eth0",
+           "addresses": [{"family": "inet", "address": "10.10.0.12", "prefixlen": 24}]
+         }],
+         "gpus": [{"name": "NVIDIA H100", "memory": "81251 MiB"}]
        }
      ]
    }
+
+Use ``--register-token`` to attach a bearer token (optional) and
+``--metadata`` to add arbitrary key/value pairs at the cluster level. Any
+HTTP status code >= 400 from the remote service results in an error.
 
 To wait for a minimum number of machines before provisioning, combine
 ``--discovery`` with ``--min-nodes`` (head node included) and optionally

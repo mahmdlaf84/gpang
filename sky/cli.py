@@ -5766,6 +5766,153 @@ def local_down(async_call: bool):
     _async_call_or_wait(request_id, async_call, request_name='sky.local.down')
 
 
+def _parse_metadata_options(metadata: Tuple[str, ...]) -> Dict[str, str]:
+    metadata_dict: Dict[str, str] = {}
+    for item in metadata:
+        if '=' not in item:
+            raise click.BadParameter(
+                f"Metadata entry '{item}' must be in KEY=VALUE format.")
+        key, value = item.split('=', 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            raise click.BadParameter(
+                f"Metadata entry '{item}' has an empty key.")
+        metadata_dict[key] = value
+    return metadata_dict
+
+
+@click.option('--ips',
+              type=str,
+              required=False,
+              help='Path to the file containing IP addresses of remote machines.')
+@click.option('--ssh-user',
+              type=str,
+              required=True,
+              help='SSH username for accessing remote machines.')
+@click.option('--ssh-key-path',
+              type=str,
+              required=True,
+              help='Path to the SSH private key.')
+@click.option('--discovery',
+              type=str,
+              required=False,
+              help=('Node discovery specification used to automatically '
+                    'fetch machines. Examples: file:///net/nodes.json, '
+                    'http://cmdb/api/nodes, exec://discover_nodes.sh'))
+@click.option('--min-nodes',
+              type=int,
+              required=False,
+              help=('Minimum number of nodes (including head) that must be '
+                    'present when using --discovery.'))
+@click.option('--discovery-refresh',
+              type=float,
+              default=5.0,
+              show_default=True,
+              required=False,
+              help=('Polling interval, in seconds, for re-running discovery '
+                    'until --min-nodes nodes are available.'))
+@click.option('--discovery-timeout',
+              type=float,
+              default=300.0,
+              show_default=True,
+              required=False,
+              help=('Maximum time in seconds to wait for discovery results '
+                    'before giving up. Set to 0 to wait indefinitely.'))
+@click.option('--register-url',
+              type=str,
+              required=True,
+              help='HTTP endpoint for registering nodes.')
+@click.option('--register-token',
+              type=str,
+              required=False,
+              help='Optional bearer token used for Authorization header.')
+@click.option('--register-timeout',
+              type=float,
+              default=15.0,
+              show_default=True,
+              required=False,
+              help='Timeout (seconds) for the node registration request.')
+@click.option('--metadata',
+              type=str,
+              multiple=True,
+              help=('Additional KEY=VALUE metadata pairs to include in the '
+                    'registration payload. Specify multiple times for '
+                    'multiple entries.'))
+@local.command('register-nodes', cls=_DocumentedCodeCommand)
+@config_option(expose_value=False)
+@_add_click_options(_COMMON_OPTIONS)
+@usage_lib.entrypoint
+def local_register_nodes(ips: Optional[str], ssh_user: str,
+                         ssh_key_path: str, discovery: Optional[str],
+                         min_nodes: Optional[int], discovery_refresh: float,
+                         discovery_timeout: float, register_url: str,
+                         register_token: Optional[str],
+                         register_timeout: float,
+                         metadata: Tuple[str, ...], async_call: bool) -> None:
+    """Collects metadata from nodes and registers them with a remote service."""
+
+    if min_nodes is not None and min_nodes <= 0:
+        raise click.BadParameter('--min-nodes must be a positive integer.')
+    if min_nodes and not discovery:
+        raise click.BadParameter('--min-nodes can only be used together '
+                                 'with --discovery.')
+    if discovery_refresh <= 0:
+        raise click.BadParameter('--discovery-refresh must be positive.')
+    if discovery_timeout < 0:
+        raise click.BadParameter('--discovery-timeout must be >= 0.')
+    if register_timeout <= 0:
+        raise click.BadParameter('--register-timeout must be positive.')
+
+    using_ips = bool(ips)
+    using_discovery = bool(discovery)
+    if not using_ips and not using_discovery:
+        raise click.BadParameter('At least one of --ips or --discovery must '
+                                 'be specified.')
+
+    ip_list: Optional[List[str]] = None
+    if ips:
+        try:
+            with open(os.path.expanduser(ips), 'r', encoding='utf-8') as f:
+                ip_list = [line.strip() for line in f.read().splitlines()
+                           if line.strip()]
+            if not ip_list:
+                raise click.BadParameter(f'IP file is empty: {ips}')
+        except (IOError, OSError) as exc:
+            raise click.BadParameter(
+                f'Failed to read IP file {ips}: {exc}') from exc
+
+    try:
+        with open(os.path.expanduser(ssh_key_path), 'r',
+                  encoding='utf-8') as f:
+            ssh_key = f.read()
+        if not ssh_key:
+            raise click.BadParameter(
+                f'SSH key file is empty: {ssh_key_path}')
+    except (IOError, OSError) as exc:
+        raise click.BadParameter(
+            f'Failed to read SSH key file {ssh_key_path}: {exc}') from exc
+
+    metadata_dict = _parse_metadata_options(metadata)
+
+    request_id = sdk.local_register_nodes(
+        ip_list,
+        ssh_user,
+        ssh_key,
+        discovery,
+        min_nodes,
+        discovery_refresh,
+        discovery_timeout,
+        register_url,
+        register_token,
+        register_timeout,
+        metadata_dict,
+    )
+    _async_call_or_wait(request_id,
+                        async_call,
+                        request_name='local register-nodes')
+
+
 @cli.group(cls=_NaturalOrderGroup)
 def api():
     """SkyPilot API server commands."""

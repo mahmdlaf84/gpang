@@ -831,6 +831,20 @@ async def local_down(request: fastapi.Request) -> None:
     )
 
 
+@app.post('/local_register_nodes')
+async def local_register_nodes(
+        request: fastapi.Request,
+        register_body: payloads.LocalRegisterNodesBody) -> None:
+    """Collects metadata from nodes and registers them with a remote service."""
+    executor.schedule_request(
+        request_id=request.state.request_id,
+        request_name='local_register_nodes',
+        request_body=register_body,
+        func=core.local_register_nodes,
+        schedule_type=requests_lib.ScheduleType.LONG,
+    )
+
+
 # === API server related APIs ===
 @app.get('/api/get')
 async def api_get(request_id: str) -> requests_lib.RequestPayload:
