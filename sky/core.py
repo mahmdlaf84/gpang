@@ -1326,6 +1326,32 @@ def local_register_nodes(
                 if (facts.instance_id and
                         not merged_cloud_metadata.get('instance_id')):
                     merged_cloud_metadata['instance_id'] = facts.instance_id
+                if (facts.instance_type and
+                        not merged_cloud_metadata.get('instance_type')):
+                    merged_cloud_metadata['instance_type'] = (
+                        facts.instance_type)
+                if facts.vpc_id and not merged_cloud_metadata.get('vpc_id'):
+                    merged_cloud_metadata['vpc_id'] = facts.vpc_id
+                if (facts.subnet_id and
+                        not merged_cloud_metadata.get('subnet_id')):
+                    merged_cloud_metadata['subnet_id'] = facts.subnet_id
+                if facts.provider_metadata:
+                    existing_provider = merged_cloud_metadata.get(
+                        'provider_metadata')
+                    if isinstance(existing_provider, dict):
+                        provider_block = dict(existing_provider)
+                    elif existing_provider:
+                        provider_block = {'value': existing_provider}
+                    else:
+                        provider_block = {}
+                    for key, value in facts.provider_metadata.items():
+                        if value is None:
+                            continue
+                        if key not in provider_block:
+                            provider_block[key] = value
+                    if provider_block:
+                        merged_cloud_metadata['provider_metadata'] = (
+                            provider_block)
                 if merged_cloud_metadata:
                     metadata['cloud'] = merged_cloud_metadata
             node_entry['metadata'] = metadata

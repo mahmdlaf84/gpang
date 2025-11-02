@@ -4,8 +4,9 @@
 
 from sky.adaptors import common
 
-_IMPORT_ERROR_MESSAGE = ('Failed to import dependencies for DO. '
-                         'Try pip install "skypilot[do]"')
+_IMPORT_ERROR_MESSAGE = (
+    'Failed to import dependencies for DigitalOcean. '
+    'Try pip install "skypilot[do]" or "skypilot[digitalocean]"')
 pydo = common.LazyImport('pydo', import_error_message=_IMPORT_ERROR_MESSAGE)
 azure = common.LazyImport('azure', import_error_message=_IMPORT_ERROR_MESSAGE)
 _LAZY_MODULES = (pydo, azure)

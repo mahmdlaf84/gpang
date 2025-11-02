@@ -28,6 +28,10 @@ class NodeFacts:
     region: Optional[str] = None
     zone: Optional[str] = None
     instance_id: Optional[str] = None
+    instance_type: Optional[str] = None
+    vpc_id: Optional[str] = None
+    subnet_id: Optional[str] = None
+    provider_metadata: Dict[str, object] = dataclasses.field(default_factory=dict)
 
 
 class NodeRegistrationError(RuntimeError):
@@ -53,6 +57,10 @@ _REMOTE_FACTS_SCRIPT = textwrap.dedent(
         "region": None,
         "zone": None,
         "instance_id": None,
+        "instance_type": None,
+        "vpc_id": None,
+        "subnet_id": None,
+        "provider_metadata": {},
     }
 
     def _run(cmd: str):
@@ -83,18 +91,39 @@ _REMOTE_FACTS_SCRIPT = textwrap.dedent(
         stripped = value.strip()
         return stripped or None
 
+    def _fetch_first(base: str, *paths: str) -> Optional[str]:
+        for path in paths:
+            payload = _safe_fetch(base + path)
+            if payload:
+                return payload
+        return None
+
     def _detect_aliyun() -> Optional[Dict[str, Optional[str]]]:
         base = 'http://100.100.100.200/latest/meta-data/'
-        region = _strip_or_none(_safe_fetch(base + 'region-id'))
-        zone = _strip_or_none(_safe_fetch(base + 'zone-id'))
-        instance_id = _strip_or_none(_safe_fetch(base + 'instance-id'))
-        if not any([region, zone, instance_id]):
+        region = _strip_or_none(_fetch_first(base, 'region-id', 'instance/region-id'))
+        zone = _strip_or_none(_fetch_first(base, 'zone-id', 'instance/zone-id'))
+        instance_id = _strip_or_none(
+            _fetch_first(base, 'instance-id', 'instance/instance-id'))
+        instance_type = _strip_or_none(
+            _fetch_first(base, 'instance-type', 'instance/instance-type'))
+        vpc_id = _strip_or_none(_fetch_first(base, 'vpc-id', 'instance/vpc-id'))
+        vswitch_id = _strip_or_none(
+            _fetch_first(base, 'vswitch-id', 'instance/vswitch-id'))
+        if not any([region, zone, instance_id, instance_type, vpc_id, vswitch_id]):
             return None
+        metadata: Dict[str, Optional[str]] = {}
+        mac = _strip_or_none(_safe_fetch(base + 'mac'))
+        if mac:
+            metadata['mac'] = mac
         return {
             'cloud': 'alibaba-cloud',
             'region': region,
             'zone': zone,
             'instance_id': instance_id,
+            'instance_type': instance_type,
+            'vpc_id': vpc_id,
+            'subnet_id': vswitch_id,
+            'metadata': metadata,
         }
 
     def _detect_tencent() -> Optional[Dict[str, Optional[str]]]:
@@ -102,13 +131,24 @@ _REMOTE_FACTS_SCRIPT = textwrap.dedent(
         region = _strip_or_none(_safe_fetch(base + 'placement/region'))
         zone = _strip_or_none(_safe_fetch(base + 'placement/zone'))
         instance_id = _strip_or_none(_safe_fetch(base + 'instance-id'))
-        if not any([region, zone, instance_id]):
+        instance_type = _strip_or_none(_safe_fetch(base + 'instance-type'))
+        vpc_id = _strip_or_none(_safe_fetch(base + 'vpc-id'))
+        subnet_id = _strip_or_none(_safe_fetch(base + 'subnet-id'))
+        if not any([region, zone, instance_id, instance_type, vpc_id, subnet_id]):
             return None
+        metadata: Dict[str, Optional[str]] = {}
+        macs = _safe_fetch(base + 'network/interfaces/macs/')
+        if macs:
+            metadata['macs_path'] = 'network/interfaces/macs/'
         return {
             'cloud': 'tencent-cloud',
             'region': region,
             'zone': zone,
             'instance_id': instance_id,
+            'instance_type': instance_type,
+            'vpc_id': vpc_id,
+            'subnet_id': subnet_id,
+            'metadata': metadata,
         }
 
     def _detect_bytedance() -> Optional[Dict[str, Optional[str]]]:
@@ -116,13 +156,19 @@ _REMOTE_FACTS_SCRIPT = textwrap.dedent(
         region = _strip_or_none(_safe_fetch(base + 'region-id'))
         zone = _strip_or_none(_safe_fetch(base + 'zone-id'))
         instance_id = _strip_or_none(_safe_fetch(base + 'instance-id'))
-        if not any([region, zone, instance_id]):
+        instance_type = _strip_or_none(_safe_fetch(base + 'instance-type'))
+        vpc_id = _strip_or_none(_safe_fetch(base + 'vpc-id'))
+        subnet_id = _strip_or_none(_safe_fetch(base + 'subnet-id'))
+        if not any([region, zone, instance_id, instance_type, vpc_id, subnet_id]):
             return None
         return {
             'cloud': 'volcengine',
             'region': region,
             'zone': zone,
             'instance_id': instance_id,
+            'instance_type': instance_type,
+            'vpc_id': vpc_id,
+            'subnet_id': subnet_id,
         }
 
     def _detect_digitalocean() -> Optional[Dict[str, Optional[str]]]:
@@ -141,11 +187,20 @@ _REMOTE_FACTS_SCRIPT = textwrap.dedent(
             instance_id = _strip_or_none(str(instance_id))
         if not any([region, instance_id]):
             return None
+        metadata: Dict[str, Optional[str]] = {}
+        features = data.get('features')
+        if isinstance(features, list):
+            metadata['features'] = features
+        networks = data.get('networks')
+        if isinstance(networks, dict):
+            metadata['networks'] = networks
         return {
             'cloud': 'digitalocean',
             'region': region,
             'zone': _strip_or_none(str(data.get('region', '') or '')),
             'instance_id': instance_id,
+            'instance_type': _strip_or_none(str(data.get('size_slug', '') or '')),
+            'metadata': metadata,
         }
 
     def _detect_cloud() -> Optional[Dict[str, Optional[str]]]:
@@ -201,6 +256,9 @@ _REMOTE_FACTS_SCRIPT = textwrap.dedent(
     provider = _detect_cloud()
     if provider:
         for key, value in provider.items():
+            if key == 'metadata' and isinstance(value, dict):
+                result['provider_metadata'] = value
+                continue
             if value is not None:
                 result[key] = value
 
@@ -305,6 +363,10 @@ def _collect_node_facts(node: node_discovery.NodeSpec,
         region=_maybe_str(payload.get('region')),
         zone=_maybe_str(payload.get('zone')),
         instance_id=_maybe_str(payload.get('instance_id')),
+        instance_type=_maybe_str(payload.get('instance_type')),
+        vpc_id=_maybe_str(payload.get('vpc_id')),
+        subnet_id=_maybe_str(payload.get('subnet_id')),
+        provider_metadata=payload.get('provider_metadata') or {},
     )
 
 
