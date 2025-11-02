@@ -100,6 +100,24 @@ aws_dependencies = [
 # a few places.
 AZURE_CLI = 'azure-cli>=2.65.0'
 
+aliyun_dependencies = [
+    'aliyun-python-sdk-core>=2.15.0',
+    'aliyun-python-sdk-ecs>=4.24.0',
+    'alibabacloud-credentials>=0.3.2',
+] + local_ray
+
+tencent_dependencies = [
+    'tencentcloud-sdk-python>=3.0.0',
+] + local_ray
+
+volcengine_dependencies = [
+    'volcengine>=1.0.80',
+] + local_ray
+
+spheron_dependencies = list(local_ray)
+
+do_dependencies = ['pydo>=0.3.0', 'azure-core>=1.24.0', 'azure-common']
+
 extras_require: Dict[str, List[str]] = {
     'aws': aws_dependencies,
     # TODO(zongheng): azure-cli is huge and takes a long time to install.
@@ -140,7 +158,10 @@ extras_require: Dict[str, List[str]] = {
     'fluidstack': [],  # No dependencies needed for fluidstack
     'cudo': ['cudo-compute>=0.1.10'],
     'paperspace': [],  # No dependencies needed for paperspace
-    'do': ['pydo>=0.3.0', 'azure-core>=1.24.0', 'azure-common'],
+    'do': do_dependencies,
+    'digitalocean': do_dependencies,
+    'spheron': spheron_dependencies,
+    'spheron-network': spheron_dependencies,
     'vast': ['vastai-sdk>=0.1.12'],
     'vsphere': [
         'pyvmomi==8.0.1.0.2',
@@ -153,7 +174,10 @@ extras_require: Dict[str, List[str]] = {
     ],
     'nebius': [
         'nebius>=0.2.0',
-    ] + aws_dependencies
+    ] + aws_dependencies,
+    'aliyun': aliyun_dependencies,
+    'tencent': tencent_dependencies,
+    'volcengine': volcengine_dependencies,
 }
 
 # Nebius needs python3.10. If python 3.9 [all] will not install nebius

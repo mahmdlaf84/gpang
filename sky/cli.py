@@ -5646,36 +5646,86 @@ def local():
               required=False,
               help='Password for the ssh-user to execute sudo commands. '
               'Required only if passwordless sudo is not setup.')
+@click.option('--discovery',
+              type=str,
+              required=False,
+              help=('Node discovery specification used to automatically '
+                    'fetch machines. Examples: file:///net/nodes.json, '
+                    'http://cmdb/api/nodes, exec://discover_nodes.sh'))
+@click.option('--min-nodes',
+              type=int,
+              required=False,
+              help=('Minimum number of nodes (including head) that must be '
+                    'present when using --discovery.'))
+@click.option('--discovery-refresh',
+              type=float,
+              default=5.0,
+              show_default=True,
+              required=False,
+              help=('Polling interval, in seconds, for re-running discovery '
+                    'until --min-nodes nodes are available.'))
+@click.option('--discovery-timeout',
+              type=float,
+              default=300.0,
+              show_default=True,
+              required=False,
+              help=('Maximum time in seconds to wait for discovery results '
+                    'before giving up. Set to 0 to wait indefinitely.'))
+@click.option('--overlay-mode',
+              type=click.Choice(['auto', 'vxlan', 'wireguard-native'],
+                                 case_sensitive=False),
+              default='auto',
+              show_default=True,
+              required=False,
+              help=('Overlay networking mode for k3s when deploying to '
+                    'remote machines. "auto" chooses wireguard-native when '
+                    'multiple regions are detected.'))
 @local.command('up', cls=_DocumentedCodeCommand)
 @config_option(expose_value=False)
 @_add_click_options(_COMMON_OPTIONS)
 @usage_lib.entrypoint
 def local_up(gpus: bool, ips: str, ssh_user: str, ssh_key_path: str,
              cleanup: bool, context_name: Optional[str],
-             password: Optional[str], async_call: bool):
+             password: Optional[str], discovery: Optional[str],
+             min_nodes: Optional[int], discovery_refresh: float,
+             discovery_timeout: float, overlay_mode: str, async_call: bool):
     """Creates a local or remote cluster."""
 
-    def _validate_args(ips, ssh_user, ssh_key_path, cleanup):
-        # If any of --ips, --ssh-user, or --ssh-key-path is specified,
-        # all must be specified
-        if bool(ips) or bool(ssh_user) or bool(ssh_key_path):
-            if not (ips and ssh_user and ssh_key_path):
+    def _validate_args(ips, ssh_user, ssh_key_path, cleanup, discovery,
+                       min_nodes, discovery_refresh, discovery_timeout):
+        using_ips = bool(ips)
+        using_discovery = bool(discovery)
+        if using_ips or using_discovery or ssh_user or ssh_key_path:
+            if not (ssh_user and ssh_key_path):
                 raise click.BadParameter(
-                    'All --ips, --ssh-user, and --ssh-key-path '
-                    'must be specified together.')
+                    '--ssh-user and --ssh-key-path must be provided when '
+                    'launching on remote machines.')
+        if using_ips and not ssh_user:
+            raise click.BadParameter('--ssh-user is required with --ips.')
+        if using_ips and not ssh_key_path:
+            raise click.BadParameter('--ssh-key-path is required with --ips.')
+        if using_discovery and not (ssh_user and ssh_key_path):
+            raise click.BadParameter('--ssh-user and --ssh-key-path are '
+                                     'required with --discovery.')
+        if cleanup and not (using_ips or using_discovery):
+            raise click.BadParameter('--cleanup requires either --ips or '
+                                     '--discovery to identify remote nodes.')
+        if min_nodes is not None and min_nodes <= 0:
+            raise click.BadParameter('--min-nodes must be a positive integer.')
+        if min_nodes and not using_discovery:
+            raise click.BadParameter('--min-nodes can only be used together '
+                                     'with --discovery.')
+        if discovery_refresh <= 0:
+            raise click.BadParameter('--discovery-refresh must be positive.')
+        if discovery_timeout < 0:
+            raise click.BadParameter('--discovery-timeout must be >= 0.')
 
-        # --cleanup can only be used if --ips, --ssh-user and --ssh-key-path
-        # are all provided
-        if cleanup and not (ips and ssh_user and ssh_key_path):
-            raise click.BadParameter('--cleanup can only be used with '
-                                     '--ips, --ssh-user and --ssh-key-path.')
-
-    _validate_args(ips, ssh_user, ssh_key_path, cleanup)
+    _validate_args(ips, ssh_user, ssh_key_path, cleanup, discovery, min_nodes,
+                   discovery_refresh, discovery_timeout)
 
     # If remote deployment arguments are specified, run remote up script
     ip_list = None
-    ssh_key = None
-    if ips and ssh_user and ssh_key_path:
+    if ips:
         # Read and validate IP file
         try:
             with open(os.path.expanduser(ips), 'r', encoding='utf-8') as f:
@@ -5685,10 +5735,10 @@ def local_up(gpus: bool, ips: str, ssh_user: str, ssh_key_path: str,
         except (IOError, OSError) as e:
             raise click.BadParameter(f'Failed to read IP file {ips}: {str(e)}')
 
-        # Read and validate SSH key file
+    ssh_key = None
+    if ssh_key_path:
         try:
-            with open(os.path.expanduser(ssh_key_path), 'r',
-                      encoding='utf-8') as f:
+            with open(os.path.expanduser(ssh_key_path), 'r', encoding='utf-8') as f:
                 ssh_key = f.read()
             if not ssh_key:
                 raise click.BadParameter(
@@ -5697,8 +5747,12 @@ def local_up(gpus: bool, ips: str, ssh_user: str, ssh_key_path: str,
             raise click.BadParameter(
                 f'Failed to read SSH key file {ssh_key_path}: {str(e)}')
 
+    overlay_mode_value = overlay_mode.lower() if overlay_mode else overlay_mode
+
     request_id = sdk.local_up(gpus, ip_list, ssh_user, ssh_key, cleanup,
-                              context_name, password)
+                              context_name, password, discovery, min_nodes,
+                              discovery_refresh, discovery_timeout,
+                              overlay_mode_value)
     _async_call_or_wait(request_id, async_call, request_name='local up')
 
 
@@ -5710,6 +5764,153 @@ def local_down(async_call: bool):
     """Deletes a local cluster."""
     request_id = sdk.local_down()
     _async_call_or_wait(request_id, async_call, request_name='sky.local.down')
+
+
+def _parse_metadata_options(metadata: Tuple[str, ...]) -> Dict[str, str]:
+    metadata_dict: Dict[str, str] = {}
+    for item in metadata:
+        if '=' not in item:
+            raise click.BadParameter(
+                f"Metadata entry '{item}' must be in KEY=VALUE format.")
+        key, value = item.split('=', 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            raise click.BadParameter(
+                f"Metadata entry '{item}' has an empty key.")
+        metadata_dict[key] = value
+    return metadata_dict
+
+
+@click.option('--ips',
+              type=str,
+              required=False,
+              help='Path to the file containing IP addresses of remote machines.')
+@click.option('--ssh-user',
+              type=str,
+              required=True,
+              help='SSH username for accessing remote machines.')
+@click.option('--ssh-key-path',
+              type=str,
+              required=True,
+              help='Path to the SSH private key.')
+@click.option('--discovery',
+              type=str,
+              required=False,
+              help=('Node discovery specification used to automatically '
+                    'fetch machines. Examples: file:///net/nodes.json, '
+                    'http://cmdb/api/nodes, exec://discover_nodes.sh'))
+@click.option('--min-nodes',
+              type=int,
+              required=False,
+              help=('Minimum number of nodes (including head) that must be '
+                    'present when using --discovery.'))
+@click.option('--discovery-refresh',
+              type=float,
+              default=5.0,
+              show_default=True,
+              required=False,
+              help=('Polling interval, in seconds, for re-running discovery '
+                    'until --min-nodes nodes are available.'))
+@click.option('--discovery-timeout',
+              type=float,
+              default=300.0,
+              show_default=True,
+              required=False,
+              help=('Maximum time in seconds to wait for discovery results '
+                    'before giving up. Set to 0 to wait indefinitely.'))
+@click.option('--register-url',
+              type=str,
+              required=True,
+              help='HTTP endpoint for registering nodes.')
+@click.option('--register-token',
+              type=str,
+              required=False,
+              help='Optional bearer token used for Authorization header.')
+@click.option('--register-timeout',
+              type=float,
+              default=15.0,
+              show_default=True,
+              required=False,
+              help='Timeout (seconds) for the node registration request.')
+@click.option('--metadata',
+              type=str,
+              multiple=True,
+              help=('Additional KEY=VALUE metadata pairs to include in the '
+                    'registration payload. Specify multiple times for '
+                    'multiple entries.'))
+@local.command('register-nodes', cls=_DocumentedCodeCommand)
+@config_option(expose_value=False)
+@_add_click_options(_COMMON_OPTIONS)
+@usage_lib.entrypoint
+def local_register_nodes(ips: Optional[str], ssh_user: str,
+                         ssh_key_path: str, discovery: Optional[str],
+                         min_nodes: Optional[int], discovery_refresh: float,
+                         discovery_timeout: float, register_url: str,
+                         register_token: Optional[str],
+                         register_timeout: float,
+                         metadata: Tuple[str, ...], async_call: bool) -> None:
+    """Collects metadata from nodes and registers them with a remote service."""
+
+    if min_nodes is not None and min_nodes <= 0:
+        raise click.BadParameter('--min-nodes must be a positive integer.')
+    if min_nodes and not discovery:
+        raise click.BadParameter('--min-nodes can only be used together '
+                                 'with --discovery.')
+    if discovery_refresh <= 0:
+        raise click.BadParameter('--discovery-refresh must be positive.')
+    if discovery_timeout < 0:
+        raise click.BadParameter('--discovery-timeout must be >= 0.')
+    if register_timeout <= 0:
+        raise click.BadParameter('--register-timeout must be positive.')
+
+    using_ips = bool(ips)
+    using_discovery = bool(discovery)
+    if not using_ips and not using_discovery:
+        raise click.BadParameter('At least one of --ips or --discovery must '
+                                 'be specified.')
+
+    ip_list: Optional[List[str]] = None
+    if ips:
+        try:
+            with open(os.path.expanduser(ips), 'r', encoding='utf-8') as f:
+                ip_list = [line.strip() for line in f.read().splitlines()
+                           if line.strip()]
+            if not ip_list:
+                raise click.BadParameter(f'IP file is empty: {ips}')
+        except (IOError, OSError) as exc:
+            raise click.BadParameter(
+                f'Failed to read IP file {ips}: {exc}') from exc
+
+    try:
+        with open(os.path.expanduser(ssh_key_path), 'r',
+                  encoding='utf-8') as f:
+            ssh_key = f.read()
+        if not ssh_key:
+            raise click.BadParameter(
+                f'SSH key file is empty: {ssh_key_path}')
+    except (IOError, OSError) as exc:
+        raise click.BadParameter(
+            f'Failed to read SSH key file {ssh_key_path}: {exc}') from exc
+
+    metadata_dict = _parse_metadata_options(metadata)
+
+    request_id = sdk.local_register_nodes(
+        ip_list,
+        ssh_user,
+        ssh_key,
+        discovery,
+        min_nodes,
+        discovery_refresh,
+        discovery_timeout,
+        register_url,
+        register_token,
+        register_timeout,
+        metadata_dict,
+    )
+    _async_call_or_wait(request_id,
+                        async_call,
+                        request_name='local register-nodes')
 
 
 @cli.group(cls=_NaturalOrderGroup)

@@ -13,6 +13,8 @@ CLEANUP=false
 INSTALL_GPU=false
 POSITIONAL_ARGS=()
 PASSWORD=""
+INVENTORY_FILE=""
+OVERLAY_MODE="vxlan"
 
 # Process all arguments
 while [[ $# -gt 0 ]]; do
@@ -23,6 +25,16 @@ while [[ $# -gt 0 ]]; do
             ;;
         --password)
             PASSWORD=$2
+            shift
+            shift
+            ;;
+        --inventory)
+            INVENTORY_FILE=$2
+            shift
+            shift
+            ;;
+        --overlay-mode)
+            OVERLAY_MODE=$2
             shift
             shift
             ;;
@@ -42,6 +54,15 @@ USER=$2
 SSH_KEY=$3
 CONTEXT_NAME=${4:-default}
 K3S_TOKEN=mytoken  # Any string can be used as the token
+# Validate overlay mode
+case "$OVERLAY_MODE" in
+    vxlan|wireguard-native)
+        ;;
+    *)
+        >&2 echo -e "${RED}Error: Unsupported overlay mode '$OVERLAY_MODE'.${NC}"
+        exit 1
+        ;;
+esac
 # Create temporary askpass script for sudo
 ASKPASS_BLOCK="# Create temporary askpass script
 ASKPASS_SCRIPT=\$(mktemp)
@@ -78,6 +99,48 @@ fi
 HEAD_NODE=$(head -n 1 "$IPS_FILE")
 WORKER_NODES=$(tail -n +2 "$IPS_FILE")
 
+declare -A INTERNAL_IP_MAP
+INVENTORY_HEAD=""
+
+if [ -n "$INVENTORY_FILE" ]; then
+    if [ ! -f "$INVENTORY_FILE" ]; then
+        >&2 echo -e "${RED}Error: Inventory file not found: $INVENTORY_FILE${NC}"
+        exit 1
+    fi
+    while IFS=$'\t' read -r PUBLIC_IP INTERNAL_IP REGION IS_HEAD; do
+        if [ -z "$PUBLIC_IP" ]; then
+            continue
+        fi
+        INTERNAL_IP_MAP["$PUBLIC_IP"]="$INTERNAL_IP"
+        if [ "$IS_HEAD" = "true" ]; then
+            INVENTORY_HEAD="$PUBLIC_IP"
+        fi
+    done < <(python3 - "$INVENTORY_FILE" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    payload = json.load(f)
+
+for node in payload.get('nodes', []):
+    public_ip = str(node.get('public_ip') or node.get('ip') or '').strip()
+    if not public_ip:
+        continue
+    internal_ip = node.get('internal_ip') or ''
+    metadata = node.get('metadata') or {}
+    region = ''
+    if isinstance(metadata, dict):
+        region = str(metadata.get('region') or '')
+    is_head = 'true' if node.get('is_head') else 'false'
+    print('\t'.join([public_ip, str(internal_ip), region, is_head]))
+PY
+    )
+    if [ -n "$INVENTORY_HEAD" ]; then
+        HEAD_NODE="$INVENTORY_HEAD"
+        WORKER_NODES=$(grep -v "^$HEAD_NODE$" "$IPS_FILE" | tail -n +1)
+    fi
+fi
+
 # Check if the IPs file is empty or not formatted correctly
 if [ -z "$HEAD_NODE" ]; then
     >&2 echo -e "${RED}Error: IPs file is empty or not formatted correctly.${NC}"
@@ -93,6 +156,8 @@ progress_message() {
 success_message() {
     echo -e "${GREEN}✔ $1${NC}"
 }
+
+progress_message "Using overlay mode '$OVERLAY_MODE' for k3s networking."
 
 # Function to run a command on a remote machine via SSH
 run_remote() {
@@ -168,11 +233,22 @@ if [ "$CLEANUP" == "true" ]; then
     exit 0
 fi
 
+# Determine head node internal IP
+HEAD_INTERNAL_IP=${INTERNAL_IP_MAP[$HEAD_NODE]}
+if [ -z "$HEAD_INTERNAL_IP" ]; then
+    HEAD_INTERNAL_IP=$(run_remote "$HEAD_NODE" "hostname -I | awk '{print \$1}'" || echo "")
+fi
+
 # Step 1: Install k3s on the head node
 progress_message "Deploying Kubernetes on head node ($HEAD_NODE)..."
+SERVER_INSTALL_ARGS="server --write-kubeconfig-mode=644 --flannel-backend=$OVERLAY_MODE --node-external-ip $HEAD_NODE"
+if [ -n "$HEAD_INTERNAL_IP" ]; then
+    SERVER_INSTALL_ARGS="$SERVER_INSTALL_ARGS --node-ip $HEAD_INTERNAL_IP"
+fi
+
 run_remote "$HEAD_NODE" "
     $ASKPASS_BLOCK
-    curl -sfL https://get.k3s.io | K3S_TOKEN=$K3S_TOKEN sudo -E -A sh - &&
+    curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC='$SERVER_INSTALL_ARGS' K3S_TOKEN=$K3S_TOKEN sudo -E -A sh - &&
     mkdir -p ~/.kube &&
     sudo -A cp /etc/rancher/k3s/k3s.yaml ~/.kube/config &&
     sudo -A chown \$(id -u):\$(id -g) ~/.kube/config &&
@@ -196,17 +272,28 @@ if check_gpu "$HEAD_NODE"; then
     INSTALL_GPU=true
 fi
 
-# Fetch the head node's internal IP (this will be passed to worker nodes)
-MASTER_ADDR=$(run_remote "$HEAD_NODE" "hostname -I | awk '{print \$1}'")
+# Fetch the head node's advertised address (this will be passed to worker nodes)
+MASTER_ADDR=$HEAD_NODE
 
-echo -e "${GREEN}Master node internal IP: $MASTER_ADDR${NC}"
+echo -e "${GREEN}Master node internal IP: ${HEAD_INTERNAL_IP:-N/A}${NC}"
+progress_message "Worker nodes will join via https://$MASTER_ADDR:6443"
 
 # Step 2: Install k3s on worker nodes and join them to the master node
 for NODE in $WORKER_NODES; do
     progress_message "Deploying Kubernetes on worker node ($NODE)..."
+    NODE_INTERNAL_IP=${INTERNAL_IP_MAP[$NODE]}
+    if [ -z "$NODE_INTERNAL_IP" ]; then
+        NODE_INTERNAL_IP=$(run_remote "$NODE" "hostname -I | awk '{print \$1}'" || echo "")
+    fi
+
+    AGENT_INSTALL_ARGS="agent --flannel-backend=$OVERLAY_MODE --node-external-ip $NODE"
+    if [ -n "$NODE_INTERNAL_IP" ]; then
+        AGENT_INSTALL_ARGS="$AGENT_INSTALL_ARGS --node-ip $NODE_INTERNAL_IP"
+    fi
+
     run_remote "$NODE" "
         $ASKPASS_BLOCK
-        curl -sfL https://get.k3s.io | K3S_URL=https://$MASTER_ADDR:6443 K3S_TOKEN=$K3S_TOKEN sudo -E -A sh -"
+        curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC='$AGENT_INSTALL_ARGS' K3S_URL=https://$MASTER_ADDR:6443 K3S_TOKEN=$K3S_TOKEN sudo -E -A sh -"
     success_message "Kubernetes deployed on worker node ($NODE)."
 
     # Check if worker node has a GPU

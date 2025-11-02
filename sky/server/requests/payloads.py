@@ -464,6 +464,27 @@ class LocalUpBody(RequestBody):
     cleanup: bool = False
     context_name: Optional[str] = None
     password: Optional[str] = None
+    discovery: Optional[str] = None
+    min_nodes: Optional[int] = None
+    discovery_refresh: float = 5.0
+    discovery_timeout: float = 300.0
+    overlay_mode: str = 'auto'
+
+
+class LocalRegisterNodesBody(RequestBody):
+    """The request body for registering nodes with a remote service."""
+
+    ips: Optional[List[str]] = None
+    ssh_user: str
+    ssh_key: str
+    discovery: Optional[str] = None
+    min_nodes: Optional[int] = None
+    discovery_refresh: float = 5.0
+    discovery_timeout: float = 300.0
+    register_url: str
+    register_token: Optional[str] = None
+    register_timeout: float = 15.0
+    metadata: Dict[str, str] = {}
 
 
 class ServeTerminateReplicaBody(RequestBody):

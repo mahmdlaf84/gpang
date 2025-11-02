@@ -136,6 +136,144 @@ Deploying SkyPilot
 
       To enable shared access to a Kubernetes cluster, you can deploy a :ref:`SkyPilot API server <sky-api-server>`.
 
+Automating node discovery and cross-region networking
+-----------------------------------------------------
+
+If you maintain a dynamic inventory of machines, ``sky local up`` can retrieve
+nodes automatically using the ``--discovery`` flag. The discovery specification
+accepts multiple schemes:
+
+* ``file:///path/to/nodes.json`` – read a JSON or newline-separated list from
+  the local filesystem.
+* ``https://inventory.example.com/nodes`` – fetch JSON from an HTTP(S)
+  endpoint. The response can be a list of IP strings or objects.
+* ``exec://path/to/script --flags`` – execute a local program that prints a
+  JSON payload or newline-separated IPs.
+
+The JSON format supports rich metadata. Each entry may contain a
+``public_ip`` field (required), an optional ``internal_ip``, and a
+``metadata`` dictionary for annotations such as ``region``. Example response:
+
+.. code-block:: json
+
+   {
+     "nodes": [
+       {
+         "public_ip": "34.10.0.11",
+         "internal_ip": "10.128.0.5",
+         "metadata": {"region": "us-west"},
+         "is_head": true
+       },
+       {
+         "public_ip": "52.16.0.22",
+         "internal_ip": "10.54.0.8",
+         "metadata": {"region": "eu-west"}
+   }
+  ]
+}
+
+
+Registering nodes with an external inventory service
+----------------------------------------------------
+
+If you maintain a centralized inventory or scheduling service, you can push
+the discovered node metadata to it using ``sky local register-nodes``. The
+command reuses the same ``--ips``/``--discovery`` options to locate machines,
+connects to each host over SSH, collects networking details (interfaces,
+internal IPs, hostnames) as well as GPU information (model names and reported
+memory), and POSTs the resulting payload to a user-specified HTTP endpoint.
+
+.. code-block:: bash
+
+   sky local register-nodes \
+     --discovery https://inventory.example.com/candidates \
+     --ssh-user ops \
+     --ssh-key-path ~/.ssh/id_rsa \
+     --register-url https://inventory.example.com/api/v1/nodes/register \
+     --register-token "$INVENTORY_TOKEN" \
+     --metadata environment=production --metadata provider=colo
+
+The payload looks like:
+
+.. code-block:: json
+
+   {
+     "cluster": {
+       "generated_at": "2024-04-02T12:10:00Z",
+       "entrypoint": "sky local register-nodes",
+       "skypilot_version": "1.0.0-dev0",
+       "metadata": {
+         "environment": "production",
+         "provider": "colo"
+       }
+     },
+     "nodes": [
+       {
+         "public_ip": "203.0.113.10",
+         "internal_ip": "10.10.0.12",
+         "hostname": "rack-a-gpu-01",
+         "role": "head",
+         "metadata": {
+           "cloud": {
+             "name": "digitalocean",
+             "region": "nyc3",
+             "instance_id": "1234567890",
+             "instance_type": "g-2vcpu-8gb",
+             "vpc_id": "2b1a6d9e-1234-5678-9012-8cde4f901234",
+             "provider_metadata": {
+               "features": ["private_networking", "backups"]
+             }
+           }
+         },
+         "network": [{
+           "name": "eth0",
+           "addresses": [{"family": "inet", "address": "10.10.0.12", "prefixlen": 24}]
+         }],
+         "gpus": [{"name": "NVIDIA H100", "memory": "81251 MiB"}]
+       }
+     ]
+   }
+
+Use ``--register-token`` to attach a bearer token (optional) and
+``--metadata`` to add arbitrary key/value pairs at the cluster level. Any
+HTTP status code >= 400 from the remote service results in an error.
+
+SkyPilot automatically inspects each node for cloud metadata. Machines running
+on Alibaba Cloud, Tencent Cloud, ByteDance Volcengine, or DigitalOcean expose
+their provider, region, and instance identifiers, instance types, and VPC
+placement information, which are included under the ``metadata.cloud`` section
+of the payload when available. The registration workflow now interrogates each
+provider's instance metadata service (e.g., Alibaba Cloud's ``latest/meta-data``
+API and Tencent Cloud's MAC-indexed metadata tree) to retrieve concrete
+attributes such as security groups, interface assignments, hostname aliases,
+and role details. Provider-specific metadata (such as DigitalOcean network maps
+or Tencent Cloud MAC address hints) is merged under
+``metadata.cloud.provider_metadata``. This augments (but does not override) any
+metadata provided via discovery or ``--metadata``.
+
+To wait for a minimum number of machines before provisioning, combine
+``--discovery`` with ``--min-nodes`` (head node included) and optionally
+``--discovery-refresh`` / ``--discovery-timeout`` to control polling cadence:
+
+.. code-block:: bash
+
+   sky local up --discovery https://inventory.example.com/nodes \
+       --ssh-user $SSH_USER --ssh-key-path $SSH_KEY \
+       --min-nodes 8 --discovery-refresh 10 --discovery-timeout 600
+
+SkyPilot automatically infers when nodes span multiple regions and switches the
+k3s overlay to ``wireguard-native``. You can override the behaviour with
+``--overlay-mode``:
+
+.. code-block:: bash
+
+   sky local up --discovery file:///data/fleet.json --overlay-mode wireguard-native \
+       --ssh-user $SSH_USER --ssh-key-path $SSH_KEY
+
+Providing internal IPs in the discovery response allows SkyPilot to advertise
+those addresses inside the cluster while still joining via each node's public
+IP, enabling large pools that span different data centers or networks.
+
 What happens behind the scenes?
 -------------------------------
 

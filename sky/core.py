@@ -1,11 +1,15 @@
 """SDK functions for cluster/job management."""
+import datetime
 import os
 import shlex
+import tempfile
 import typing
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import colorama
+import requests
 
+import sky
 from sky import admin_policy
 from sky import backends
 from sky import check as sky_check
@@ -37,6 +41,8 @@ from sky.utils import status_lib
 from sky.utils import subprocess_utils
 from sky.utils import ux_utils
 from sky.utils.kubernetes import kubernetes_deploy_utils
+from sky.utils.kubernetes import node_discovery
+from sky.utils.kubernetes import node_registration
 
 if typing.TYPE_CHECKING:
     from sky import resources as resources_lib
@@ -1065,34 +1071,77 @@ def local_up(gpus: bool,
              ssh_key: Optional[str],
              cleanup: bool,
              context_name: Optional[str] = None,
-             password: Optional[str] = None) -> None:
+             password: Optional[str] = None,
+             discovery: Optional[str] = None,
+             min_nodes: Optional[int] = None,
+             discovery_refresh: float = 5.0,
+             discovery_timeout: float = 300.0,
+             overlay_mode: str = 'auto') -> None:
     """Creates a local or remote cluster."""
 
-    def _validate_args(ips, ssh_user, ssh_key, cleanup):
-        # If any of --ips, --ssh-user, or --ssh-key-path is specified,
-        # all must be specified
-        if bool(ips) or bool(ssh_user) or bool(ssh_key):
-            if not (ips and ssh_user and ssh_key):
-                with ux_utils.print_exception_no_traceback():
-                    raise ValueError(
-                        'All ips, ssh_user, and ssh_key must be specified '
-                        'together.')
+    def _validate_args(ips, ssh_user, ssh_key, cleanup, discovery, min_nodes,
+                       discovery_refresh, discovery_timeout):
+        remote_requested = bool(ips or discovery or ssh_user or ssh_key)
+        if remote_requested and not (ssh_user and ssh_key):
+            with ux_utils.print_exception_no_traceback():
+                raise ValueError('ssh_user and ssh_key must be provided when '
+                                 'launching on remote machines.')
 
         # --cleanup can only be used if --ips, --ssh-user and --ssh-key-path
         # are all provided
-        if cleanup and not (ips and ssh_user and ssh_key):
+        if cleanup and not (ips or discovery):
             with ux_utils.print_exception_no_traceback():
                 raise ValueError(
-                    'cleanup can only be used with ips, ssh_user and ssh_key.')
+                    'cleanup can only be used when ips or discovery is '
+                    'specified alongside ssh credentials.')
 
-    _validate_args(ips, ssh_user, ssh_key, cleanup)
+        if min_nodes is not None and min_nodes <= 0:
+            with ux_utils.print_exception_no_traceback():
+                raise ValueError('--min-nodes must be a positive integer.')
+        if min_nodes and not discovery:
+            with ux_utils.print_exception_no_traceback():
+                raise ValueError('--min-nodes requires discovery to be set.')
+        if discovery_refresh <= 0:
+            with ux_utils.print_exception_no_traceback():
+                raise ValueError('--discovery-refresh must be positive.')
+        if discovery_timeout < 0:
+            with ux_utils.print_exception_no_traceback():
+                raise ValueError('--discovery-timeout must be >= 0.')
+
+    _validate_args(ips, ssh_user, ssh_key, cleanup, discovery, min_nodes,
+                   discovery_refresh, discovery_timeout)
+
+    overlay_mode = overlay_mode.lower() if overlay_mode else overlay_mode
 
     # If remote deployment arguments are specified, run remote up script
     if ips:
         assert ssh_user is not None and ssh_key is not None
-        kubernetes_deploy_utils.deploy_remote_cluster(ips, ssh_user, ssh_key,
-                                                      cleanup, context_name,
-                                                      password)
+        kubernetes_deploy_utils.deploy_remote_cluster(
+            ips,
+            ssh_user,
+            ssh_key,
+            cleanup,
+            context_name,
+            password,
+            discovery_spec=discovery,
+            discovery_min_nodes=min_nodes,
+            discovery_refresh_interval=discovery_refresh,
+            discovery_timeout=discovery_timeout,
+            overlay_mode=overlay_mode)
+    elif discovery:
+        assert ssh_user is not None and ssh_key is not None
+        kubernetes_deploy_utils.deploy_remote_cluster(
+            None,
+            ssh_user,
+            ssh_key,
+            cleanup,
+            context_name,
+            password,
+            discovery_spec=discovery,
+            discovery_min_nodes=min_nodes,
+            discovery_refresh_interval=discovery_refresh,
+            discovery_timeout=discovery_timeout,
+            overlay_mode=overlay_mode)
     else:
         # Run local deployment (kind) if no remote args are specified
         kubernetes_deploy_utils.deploy_local_cluster(gpus)
@@ -1146,3 +1195,202 @@ def local_down() -> None:
             ux_utils.finishing_message('Local cluster removed.',
                                        log_path=log_path,
                                        is_local=True))
+
+
+def local_register_nodes(
+        ips: Optional[List[str]],
+        ssh_user: str,
+        ssh_key: str,
+        discovery: Optional[str] = None,
+        min_nodes: Optional[int] = None,
+        discovery_refresh: float = 5.0,
+        discovery_timeout: float = 300.0,
+        register_url: str = '',
+        register_token: Optional[str] = None,
+        register_timeout: float = 15.0,
+        metadata: Optional[Dict[str, str]] = None) -> None:
+    """Collects metadata about nodes and registers them with a remote service."""
+
+    if not ssh_user or not ssh_key:
+        with ux_utils.print_exception_no_traceback():
+            raise ValueError('SSH credentials are required to register nodes.')
+    if not register_url:
+        with ux_utils.print_exception_no_traceback():
+            raise ValueError('A --register-url must be provided.')
+    if register_timeout <= 0:
+        with ux_utils.print_exception_no_traceback():
+            raise ValueError('--register-timeout must be positive.')
+
+    metadata = metadata or {}
+
+    nodes: List[node_discovery.NodeSpec] = []
+    discovery_error: Optional[Exception] = None
+    if discovery:
+        try:
+            nodes = node_discovery.discover_nodes(discovery,
+                                                  min_nodes=min_nodes,
+                                                  refresh_interval=
+                                                  discovery_refresh,
+                                                  timeout=discovery_timeout)
+        except Exception as exc:  # pylint: disable=broad-except
+            discovery_error = exc
+            logger.warning('Node discovery failed: %s', exc)
+
+    if ips:
+        nodes = node_discovery.merge_static_ips(ips, nodes)
+    elif not nodes:
+        if discovery_error is not None:
+            with ux_utils.print_exception_no_traceback():
+                raise RuntimeError('Failed to discover nodes: '
+                                   f'{discovery_error}') from discovery_error
+        with ux_utils.print_exception_no_traceback():
+            raise ValueError('No nodes were provided for registration.')
+
+    nodes = node_discovery.choose_head(nodes)
+    if not nodes:
+        with ux_utils.print_exception_no_traceback():
+            raise ValueError('No nodes resolved for registration.')
+
+    logger.info('Preparing %d node(s) for registration. Head node: %s',
+                len(nodes), nodes[0].public_ip)
+
+    key_path: Optional[str] = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', delete=False) as key_file:
+            key_file.write(ssh_key)
+            key_file.flush()
+            os.chmod(key_file.name, 0o600)
+            key_path = key_file.name
+
+        facts_map = node_registration.collect_node_facts(
+            nodes,
+            ssh_user=ssh_user,
+            ssh_key_path=key_path,
+        )
+    finally:
+        if key_path and os.path.exists(key_path):
+            os.remove(key_path)
+
+    generated_at = datetime.datetime.utcnow().replace(
+        microsecond=0).isoformat() + 'Z'
+    cluster_metadata: Dict[str, Any] = {
+        'generated_at': generated_at,
+        'skypilot_version': sky.__version__,
+        'entrypoint': 'sky local register-nodes',
+    }
+    if discovery:
+        cluster_metadata['discovery'] = {
+            'spec': discovery,
+            'min_nodes': min_nodes,
+            'refresh_interval': discovery_refresh,
+            'timeout': discovery_timeout,
+        }
+    if metadata:
+        cluster_metadata['metadata'] = metadata
+
+    node_payloads: List[Dict[str, Any]] = []
+    for node in nodes:
+        facts = facts_map.get(node.public_ip)
+        node_entry: Dict[str, Any] = {
+            'public_ip': node.public_ip,
+            'internal_ip': facts.internal_ip if facts else node.internal_ip,
+            'metadata': dict(node.metadata),
+            'role': 'head' if node.is_head else 'worker',
+        }
+        if facts:
+            if facts.hostname:
+                node_entry['hostname'] = facts.hostname
+            if facts.network:
+                node_entry['network'] = facts.network
+            if facts.gpus:
+                node_entry['gpus'] = facts.gpus
+            if facts.internal_ip and not node_entry.get('internal_ip'):
+                node_entry['internal_ip'] = facts.internal_ip
+            metadata = node_entry.get('metadata') or {}
+            if not isinstance(metadata, dict):
+                metadata = {'value': metadata}
+            if any([facts.cloud, facts.region, facts.zone, facts.instance_id]):
+                cloud_metadata = metadata.get('cloud')
+                if isinstance(cloud_metadata, dict):
+                    merged_cloud_metadata = dict(cloud_metadata)
+                elif cloud_metadata:
+                    merged_cloud_metadata = {'name': str(cloud_metadata)}
+                else:
+                    merged_cloud_metadata = {}
+                if facts.cloud and not merged_cloud_metadata.get('name'):
+                    merged_cloud_metadata['name'] = facts.cloud
+                if facts.region and not merged_cloud_metadata.get('region'):
+                    merged_cloud_metadata['region'] = facts.region
+                if facts.zone and not merged_cloud_metadata.get('zone'):
+                    merged_cloud_metadata['zone'] = facts.zone
+                if (facts.instance_id and
+                        not merged_cloud_metadata.get('instance_id')):
+                    merged_cloud_metadata['instance_id'] = facts.instance_id
+                if (facts.instance_type and
+                        not merged_cloud_metadata.get('instance_type')):
+                    merged_cloud_metadata['instance_type'] = (
+                        facts.instance_type)
+                if facts.vpc_id and not merged_cloud_metadata.get('vpc_id'):
+                    merged_cloud_metadata['vpc_id'] = facts.vpc_id
+                if (facts.subnet_id and
+                        not merged_cloud_metadata.get('subnet_id')):
+                    merged_cloud_metadata['subnet_id'] = facts.subnet_id
+                if facts.provider_metadata:
+                    existing_provider = merged_cloud_metadata.get(
+                        'provider_metadata')
+                    if isinstance(existing_provider, dict):
+                        provider_block = dict(existing_provider)
+                    elif existing_provider:
+                        provider_block = {'value': existing_provider}
+                    else:
+                        provider_block = {}
+                    for key, value in facts.provider_metadata.items():
+                        if value is None:
+                            continue
+                        if key not in provider_block:
+                            provider_block[key] = value
+                    if provider_block:
+                        merged_cloud_metadata['provider_metadata'] = (
+                            provider_block)
+                if merged_cloud_metadata:
+                    metadata['cloud'] = merged_cloud_metadata
+            node_entry['metadata'] = metadata
+            if facts.warnings:
+                node_entry['warnings'] = facts.warnings
+            if facts.error:
+                node_entry['errors'] = [facts.error]
+        else:
+            node_entry['errors'] = ['Metadata collection failed.']
+        if node_entry.get('internal_ip') is None:
+            node_entry.pop('internal_ip', None)
+        node_payloads.append(node_entry)
+
+    payload: Dict[str, Any] = {
+        'nodes': node_payloads,
+        'cluster': cluster_metadata,
+    }
+
+    headers = {'Content-Type': 'application/json'}
+    if register_token:
+        headers['Authorization'] = f'Bearer {register_token}'
+
+    logger.info('Registering %d node(s) with %s', len(node_payloads),
+                register_url)
+    try:
+        response = requests.post(register_url,
+                                 json=payload,
+                                 headers=headers,
+                                 timeout=register_timeout)
+    except requests.RequestException as exc:
+        with ux_utils.print_exception_no_traceback():
+            raise RuntimeError('Failed to register nodes with remote service: '
+                               f'{exc}') from exc
+
+    if response.status_code >= 400:
+        message = response.text.strip()
+        with ux_utils.print_exception_no_traceback():
+            raise RuntimeError(
+                f'Remote service returned HTTP {response.status_code}: '
+                f'{message or "<empty>"}')
+
+    logger.info('Node registration completed successfully.')

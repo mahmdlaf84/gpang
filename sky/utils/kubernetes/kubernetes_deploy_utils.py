@@ -1,4 +1,5 @@
 """Utility functions for deploying Kubernetes clusters."""
+import json
 import os
 import shlex
 import subprocess
@@ -13,6 +14,7 @@ from sky.provision.kubernetes import utils as kubernetes_utils
 from sky.skylet import constants
 from sky.skylet import log_lib
 from sky.utils import log_utils
+from sky.utils.kubernetes import node_discovery
 from sky.utils import rich_utils
 from sky.utils import subprocess_utils
 from sky.utils import ux_utils
@@ -20,12 +22,17 @@ from sky.utils import ux_utils
 logger = sky_logging.init_logger(__name__)
 
 
-def deploy_remote_cluster(ip_list: List[str],
+def deploy_remote_cluster(ip_list: Optional[List[str]],
                           ssh_user: str,
                           ssh_key: str,
                           cleanup: bool,
                           context_name: Optional[str] = None,
-                          password: Optional[str] = None):
+                          password: Optional[str] = None,
+                          discovery_spec: Optional[str] = None,
+                          discovery_min_nodes: Optional[int] = None,
+                          discovery_refresh_interval: float = 5.0,
+                          discovery_timeout: float = 300.0,
+                          overlay_mode: str = 'auto'):
     success = False
     path_to_package = os.path.dirname(__file__)
     up_script_path = os.path.join(path_to_package, 'deploy_remote_cluster.sh')
@@ -33,72 +40,118 @@ def deploy_remote_cluster(ip_list: List[str],
     cwd = os.path.dirname(os.path.abspath(up_script_path))
 
     # Create temporary files for the IPs and SSH key
-    with tempfile.NamedTemporaryFile(mode='w') as ip_file, \
-         tempfile.NamedTemporaryFile(mode='w') as key_file:
+    inventory_path: Optional[str] = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w') as ip_file, \
+             tempfile.NamedTemporaryFile(mode='w') as key_file, \
+             tempfile.NamedTemporaryFile(mode='w', delete=False) as inventory_file:
 
-        # Write IPs and SSH key to temporary files
-        ip_file.write('\n'.join(ip_list))
-        ip_file.flush()
+            inventory_path = inventory_file.name
 
-        key_file.write(ssh_key)
-        key_file.flush()
-        os.chmod(key_file.name, 0o600)
+            # Discover nodes if requested.
+            nodes: List[node_discovery.NodeSpec] = []
+            if discovery_spec:
+                logger.info('Discovering remote nodes using spec %s.',
+                            discovery_spec)
+                nodes = node_discovery.discover_nodes(
+                    discovery_spec,
+                    min_nodes=discovery_min_nodes,
+                    refresh_interval=discovery_refresh_interval,
+                    timeout=discovery_timeout)
 
-        deploy_command = (f'{up_script_path} {ip_file.name} '
-                          f'{ssh_user} {key_file.name}')
-        if context_name is not None:
-            deploy_command += f' {context_name}'
-        if password is not None:
-            deploy_command += f' --password {password}'
-        if cleanup:
-            deploy_command += ' --cleanup'
+            if ip_list:
+                nodes = node_discovery.merge_static_ips(ip_list, nodes)
+            elif not nodes:
+                raise RuntimeError(
+                    'No nodes were provided for remote deployment.')
 
-        # Convert the command to a format suitable for subprocess
-        deploy_command = shlex.split(deploy_command)
+            nodes = node_discovery.choose_head(nodes)
 
-        # Setup logging paths
-        run_timestamp = sky_logging.get_run_timestamp()
-        log_path = os.path.join(constants.SKY_LOGS_DIRECTORY, run_timestamp,
-                                'local_up.log')
+            logger.info('Prepared %d node(s) for deployment. Head: %s',
+                        len(nodes), nodes[0].public_ip if nodes else 'N/A')
 
-        if cleanup:
-            msg_str = 'Cleaning up remote cluster...'
-        else:
-            msg_str = 'Deploying remote cluster...'
-        with rich_utils.safe_status(
-                ux_utils.spinner_message(msg_str,
-                                         log_path=log_path,
-                                         is_local=True)):
-            returncode, _, stderr = log_lib.run_with_log(
-                cmd=deploy_command,
-                log_path=log_path,
-                require_outputs=True,
-                stream_logs=False,
-                line_processor=log_utils.SkyRemoteUpLineProcessor(
-                    log_path=log_path, is_local=True),
-                cwd=cwd)
-        if returncode == 0:
-            success = True
-        else:
-            with ux_utils.print_exception_no_traceback():
-                log_hint = ux_utils.log_path_hint(log_path, is_local=True)
-                raise RuntimeError('Failed to deploy remote cluster. '
-                                   f'Full log: {log_hint}'
-                                   f'\nError: {stderr}')
+            # Determine overlay mode.
+            chosen_overlay = node_discovery.infer_overlay_mode(nodes,
+                                                               overlay_mode)
 
-        if success:
+            # Write IPs and SSH key to temporary files
+            serialized_ips = [node.public_ip for node in nodes]
+            ip_file.write('\n'.join(serialized_ips))
+            ip_file.flush()
+
+            key_file.write(ssh_key)
+            key_file.flush()
+            os.chmod(key_file.name, 0o600)
+
+            inventory_payload = {
+                'nodes': [node.to_json() for node in nodes],
+                'overlay_mode': chosen_overlay,
+            }
+            json.dump(inventory_payload, inventory_file)
+            inventory_file.flush()
+
+            deploy_command = (f'{up_script_path} {ip_file.name} '
+                              f'{ssh_user} {key_file.name}')
+            if context_name is not None:
+                deploy_command += f' {context_name}'
+            if password is not None:
+                deploy_command += f' --password {password}'
             if cleanup:
-                logger.info(
-                    ux_utils.finishing_message(
-                        '🎉 Remote cluster cleaned up successfully.',
-                        log_path=log_path,
-                        is_local=True))
+                deploy_command += ' --cleanup'
+            if discovery_spec and inventory_path:
+                deploy_command += f' --inventory {inventory_path}'
+            if chosen_overlay:
+                deploy_command += f' --overlay-mode {chosen_overlay}'
+
+            # Convert the command to a format suitable for subprocess
+            deploy_command = shlex.split(deploy_command)
+
+            # Setup logging paths
+            run_timestamp = sky_logging.get_run_timestamp()
+            log_path = os.path.join(constants.SKY_LOGS_DIRECTORY, run_timestamp,
+                                    'local_up.log')
+
+            if cleanup:
+                msg_str = 'Cleaning up remote cluster...'
             else:
-                logger.info(
-                    ux_utils.finishing_message(
-                        '🎉 Remote cluster deployed successfully.',
-                        log_path=log_path,
-                        is_local=True))
+                msg_str = 'Deploying remote cluster...'
+            with rich_utils.safe_status(
+                    ux_utils.spinner_message(msg_str,
+                                             log_path=log_path,
+                                             is_local=True)):
+                returncode, _, stderr = log_lib.run_with_log(
+                    cmd=deploy_command,
+                    log_path=log_path,
+                    require_outputs=True,
+                    stream_logs=False,
+                    line_processor=log_utils.SkyRemoteUpLineProcessor(
+                        log_path=log_path, is_local=True),
+                    cwd=cwd)
+                if returncode == 0:
+                    success = True
+                else:
+                    with ux_utils.print_exception_no_traceback():
+                        log_hint = ux_utils.log_path_hint(log_path, is_local=True)
+                        raise RuntimeError('Failed to deploy remote cluster. '
+                                           f'Full log: {log_hint}'
+                                           f'\nError: {stderr}')
+
+                if success:
+                    if cleanup:
+                        logger.info(
+                            ux_utils.finishing_message(
+                                '🎉 Remote cluster cleaned up successfully.',
+                                log_path=log_path,
+                                is_local=True))
+                    else:
+                        logger.info(
+                            ux_utils.finishing_message(
+                                '🎉 Remote cluster deployed successfully.',
+                                log_path=log_path,
+                                is_local=True))
+    finally:
+        if inventory_path and os.path.exists(inventory_path):
+            os.remove(inventory_path)
 
 
 def deploy_local_cluster(gpus: bool):

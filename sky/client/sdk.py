@@ -1318,7 +1318,12 @@ def local_up(gpus: bool,
              ssh_key: Optional[str],
              cleanup: bool,
              context_name: Optional[str] = None,
-             password: Optional[str] = None) -> server_common.RequestId:
+             password: Optional[str] = None,
+             discovery: Optional[str] = None,
+             min_nodes: Optional[int] = None,
+             discovery_refresh: float = 5.0,
+             discovery_timeout: float = 300.0,
+             overlay_mode: str = 'auto') -> server_common.RequestId:
     """Launches a Kubernetes cluster on local machines.
 
     Returns:
@@ -1332,13 +1337,20 @@ def local_up(gpus: bool,
             raise ValueError(
                 'sky local up is only supported when running SkyPilot locally.')
 
+    normalized_overlay = overlay_mode.lower() if overlay_mode else overlay_mode
+
     body = payloads.LocalUpBody(gpus=gpus,
                                 ips=ips,
                                 ssh_user=ssh_user,
                                 ssh_key=ssh_key,
                                 cleanup=cleanup,
                                 context_name=context_name,
-                                password=password)
+                                password=password,
+                                discovery=discovery,
+                                min_nodes=min_nodes,
+                                discovery_refresh=discovery_refresh,
+                                discovery_timeout=discovery_timeout,
+                                overlay_mode=normalized_overlay)
     response = requests.post(f'{server_common.get_server_url()}/local_up',
                              json=json.loads(body.model_dump_json()),
                              cookies=server_common.get_api_cookie_jar())
@@ -1359,6 +1371,49 @@ def local_down() -> server_common.RequestId:
                              'SkyPilot locally.')
     response = requests.post(f'{server_common.get_server_url()}/local_down',
                              cookies=server_common.get_api_cookie_jar())
+    return server_common.get_request_id(response)
+
+
+@usage_lib.entrypoint
+@server_common.check_server_healthy_or_start
+@annotations.client_api
+def local_register_nodes(
+        ips: Optional[List[str]],
+        ssh_user: str,
+        ssh_key: str,
+        discovery: Optional[str] = None,
+        min_nodes: Optional[int] = None,
+        discovery_refresh: float = 5.0,
+        discovery_timeout: float = 300.0,
+        register_url: str = '',
+        register_token: Optional[str] = None,
+        register_timeout: float = 15.0,
+        metadata: Optional[Dict[str, str]] = None
+) -> server_common.RequestId:
+    """Registers nodes with a remote service."""
+
+    if not server_common.is_api_server_local():
+        with ux_utils.print_exception_no_traceback():
+            raise ValueError('sky local register-nodes is only supported when '
+                             'running SkyPilot locally.')
+
+    body = payloads.LocalRegisterNodesBody(
+        ips=ips,
+        ssh_user=ssh_user,
+        ssh_key=ssh_key,
+        discovery=discovery,
+        min_nodes=min_nodes,
+        discovery_refresh=discovery_refresh,
+        discovery_timeout=discovery_timeout,
+        register_url=register_url,
+        register_token=register_token,
+        register_timeout=register_timeout,
+        metadata=metadata or {},
+    )
+    response = requests.post(
+        f'{server_common.get_server_url()}/local_register_nodes',
+        json=json.loads(body.model_dump_json()),
+        cookies=server_common.get_api_cookie_jar())
     return server_common.get_request_id(response)
 
 
