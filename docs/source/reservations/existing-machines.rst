@@ -213,6 +213,13 @@ The payload looks like:
          "internal_ip": "10.10.0.12",
          "hostname": "rack-a-gpu-01",
          "role": "head",
+         "metadata": {
+           "cloud": {
+             "name": "digitalocean",
+             "region": "nyc3",
+             "instance_id": "1234567890"
+           }
+         },
          "network": [{
            "name": "eth0",
            "addresses": [{"family": "inet", "address": "10.10.0.12", "prefixlen": 24}]
@@ -225,6 +232,12 @@ The payload looks like:
 Use ``--register-token`` to attach a bearer token (optional) and
 ``--metadata`` to add arbitrary key/value pairs at the cluster level. Any
 HTTP status code >= 400 from the remote service results in an error.
+
+SkyPilot automatically inspects each node for cloud metadata. Machines running
+on Alibaba Cloud, Tencent Cloud, ByteDance Volcengine, or DigitalOcean expose
+their provider, region, and instance identifiers, which are included under the
+``metadata.cloud`` section of the payload when available. This augments (but
+does not override) any metadata provided via discovery or ``--metadata``.
 
 To wait for a minimum number of machines before provisioning, combine
 ``--discovery`` with ``--min-nodes`` (head node included) and optionally

@@ -24,6 +24,10 @@ class NodeFacts:
     gpus: List[Dict[str, object]] = dataclasses.field(default_factory=list)
     warnings: List[str] = dataclasses.field(default_factory=list)
     error: Optional[str] = None
+    cloud: Optional[str] = None
+    region: Optional[str] = None
+    zone: Optional[str] = None
+    instance_id: Optional[str] = None
 
 
 class NodeRegistrationError(RuntimeError):
@@ -35,6 +39,8 @@ _REMOTE_FACTS_SCRIPT = textwrap.dedent(
     import json
     import socket
     import subprocess
+    import urllib.request
+    from typing import Dict, Optional
 
     result = {
         "hostname": None,
@@ -43,6 +49,10 @@ _REMOTE_FACTS_SCRIPT = textwrap.dedent(
         "gpus": [],
         "warnings": [],
         "error": None,
+        "cloud": None,
+        "region": None,
+        "zone": None,
+        "instance_id": None,
     }
 
     def _run(cmd: str):
@@ -54,6 +64,100 @@ _REMOTE_FACTS_SCRIPT = textwrap.dedent(
         except Exception as exc:  # pylint: disable=broad-except
             result["warnings"].append(f"{cmd}: {exc}")
             return None
+
+    def _safe_fetch(url: str,
+                    *,
+                    headers: Optional[Dict[str, str]] = None,
+                    timeout: float = 1.0) -> Optional[str]:
+        try:
+            request = urllib.request.Request(url, headers=headers or {})
+            with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+                data = response.read().decode('utf-8')
+            return data
+        except Exception:  # pylint: disable=broad-except
+            return None
+
+    def _strip_or_none(value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+    def _detect_aliyun() -> Optional[Dict[str, Optional[str]]]:
+        base = 'http://100.100.100.200/latest/meta-data/'
+        region = _strip_or_none(_safe_fetch(base + 'region-id'))
+        zone = _strip_or_none(_safe_fetch(base + 'zone-id'))
+        instance_id = _strip_or_none(_safe_fetch(base + 'instance-id'))
+        if not any([region, zone, instance_id]):
+            return None
+        return {
+            'cloud': 'alibaba-cloud',
+            'region': region,
+            'zone': zone,
+            'instance_id': instance_id,
+        }
+
+    def _detect_tencent() -> Optional[Dict[str, Optional[str]]]:
+        base = 'http://metadata.tencentyun.com/latest/meta-data/'
+        region = _strip_or_none(_safe_fetch(base + 'placement/region'))
+        zone = _strip_or_none(_safe_fetch(base + 'placement/zone'))
+        instance_id = _strip_or_none(_safe_fetch(base + 'instance-id'))
+        if not any([region, zone, instance_id]):
+            return None
+        return {
+            'cloud': 'tencent-cloud',
+            'region': region,
+            'zone': zone,
+            'instance_id': instance_id,
+        }
+
+    def _detect_bytedance() -> Optional[Dict[str, Optional[str]]]:
+        base = 'http://100.96.0.96/latest/meta-data/'
+        region = _strip_or_none(_safe_fetch(base + 'region-id'))
+        zone = _strip_or_none(_safe_fetch(base + 'zone-id'))
+        instance_id = _strip_or_none(_safe_fetch(base + 'instance-id'))
+        if not any([region, zone, instance_id]):
+            return None
+        return {
+            'cloud': 'volcengine',
+            'region': region,
+            'zone': zone,
+            'instance_id': instance_id,
+        }
+
+    def _detect_digitalocean() -> Optional[Dict[str, Optional[str]]]:
+        payload = _safe_fetch(
+            'http://169.254.169.254/metadata/v1.json',
+            headers={'Metadata-Flavor': 'DigitalOcean'})
+        if not payload:
+            return None
+        try:
+            data = json.loads(payload)
+        except Exception:  # pylint: disable=broad-except
+            return None
+        region = _strip_or_none(str(data.get('region', '') or ''))
+        instance_id = data.get('id')
+        if instance_id is not None:
+            instance_id = _strip_or_none(str(instance_id))
+        if not any([region, instance_id]):
+            return None
+        return {
+            'cloud': 'digitalocean',
+            'region': region,
+            'zone': _strip_or_none(str(data.get('region', '') or '')),
+            'instance_id': instance_id,
+        }
+
+    def _detect_cloud() -> Optional[Dict[str, Optional[str]]]:
+        for detector in (
+                _detect_aliyun,
+                _detect_tencent,
+                _detect_bytedance,
+                _detect_digitalocean):
+            info = detector()
+            if info:
+                return info
+        return None
 
     result["hostname"] = socket.gethostname()
 
@@ -93,6 +197,12 @@ _REMOTE_FACTS_SCRIPT = textwrap.dedent(
             result["internal_ip"] = socket.gethostbyname(result["hostname"])
         except Exception as exc:  # pylint: disable=broad-except
             result["warnings"].append(f"hostname lookup failed: {exc}")
+
+    provider = _detect_cloud()
+    if provider:
+        for key, value in provider.items():
+            if value is not None:
+                result[key] = value
 
     gpu_output = _run('nvidia-smi --query-gpu=name,memory.total --format=csv,noheader')
     gpus = []
@@ -179,6 +289,11 @@ def _collect_node_facts(node: node_discovery.NodeSpec,
         raise NodeRegistrationError(
             f'invalid JSON payload from {node.public_ip}: {exc}: {output}')
 
+    def _maybe_str(value: Optional[object]) -> Optional[str]:
+        if value in (None, ''):
+            return None
+        return str(value)
+
     return NodeFacts(
         hostname=payload.get('hostname'),
         internal_ip=payload.get('internal_ip'),
@@ -186,6 +301,10 @@ def _collect_node_facts(node: node_discovery.NodeSpec,
         gpus=payload.get('gpus') or [],
         warnings=[w for w in payload.get('warnings', []) if w],
         error=payload.get('error'),
+        cloud=_maybe_str(payload.get('cloud')),
+        region=_maybe_str(payload.get('region')),
+        zone=_maybe_str(payload.get('zone')),
+        instance_id=_maybe_str(payload.get('instance_id')),
     )
 
 

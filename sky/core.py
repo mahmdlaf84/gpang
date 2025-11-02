@@ -1306,6 +1306,29 @@ def local_register_nodes(
                 node_entry['gpus'] = facts.gpus
             if facts.internal_ip and not node_entry.get('internal_ip'):
                 node_entry['internal_ip'] = facts.internal_ip
+            metadata = node_entry.get('metadata') or {}
+            if not isinstance(metadata, dict):
+                metadata = {'value': metadata}
+            if any([facts.cloud, facts.region, facts.zone, facts.instance_id]):
+                cloud_metadata = metadata.get('cloud')
+                if isinstance(cloud_metadata, dict):
+                    merged_cloud_metadata = dict(cloud_metadata)
+                elif cloud_metadata:
+                    merged_cloud_metadata = {'name': str(cloud_metadata)}
+                else:
+                    merged_cloud_metadata = {}
+                if facts.cloud and not merged_cloud_metadata.get('name'):
+                    merged_cloud_metadata['name'] = facts.cloud
+                if facts.region and not merged_cloud_metadata.get('region'):
+                    merged_cloud_metadata['region'] = facts.region
+                if facts.zone and not merged_cloud_metadata.get('zone'):
+                    merged_cloud_metadata['zone'] = facts.zone
+                if (facts.instance_id and
+                        not merged_cloud_metadata.get('instance_id')):
+                    merged_cloud_metadata['instance_id'] = facts.instance_id
+                if merged_cloud_metadata:
+                    metadata['cloud'] = merged_cloud_metadata
+            node_entry['metadata'] = metadata
             if facts.warnings:
                 node_entry['warnings'] = facts.warnings
             if facts.error:
