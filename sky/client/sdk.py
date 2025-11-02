@@ -1318,7 +1318,12 @@ def local_up(gpus: bool,
              ssh_key: Optional[str],
              cleanup: bool,
              context_name: Optional[str] = None,
-             password: Optional[str] = None) -> server_common.RequestId:
+             password: Optional[str] = None,
+             discovery: Optional[str] = None,
+             min_nodes: Optional[int] = None,
+             discovery_refresh: float = 5.0,
+             discovery_timeout: float = 300.0,
+             overlay_mode: str = 'auto') -> server_common.RequestId:
     """Launches a Kubernetes cluster on local machines.
 
     Returns:
@@ -1332,13 +1337,20 @@ def local_up(gpus: bool,
             raise ValueError(
                 'sky local up is only supported when running SkyPilot locally.')
 
+    normalized_overlay = overlay_mode.lower() if overlay_mode else overlay_mode
+
     body = payloads.LocalUpBody(gpus=gpus,
                                 ips=ips,
                                 ssh_user=ssh_user,
                                 ssh_key=ssh_key,
                                 cleanup=cleanup,
                                 context_name=context_name,
-                                password=password)
+                                password=password,
+                                discovery=discovery,
+                                min_nodes=min_nodes,
+                                discovery_refresh=discovery_refresh,
+                                discovery_timeout=discovery_timeout,
+                                overlay_mode=normalized_overlay)
     response = requests.post(f'{server_common.get_server_url()}/local_up',
                              json=json.loads(body.model_dump_json()),
                              cookies=server_common.get_api_cookie_jar())

@@ -464,6 +464,11 @@ class LocalUpBody(RequestBody):
     cleanup: bool = False
     context_name: Optional[str] = None
     password: Optional[str] = None
+    discovery: Optional[str] = None
+    min_nodes: Optional[int] = None
+    discovery_refresh: float = 5.0
+    discovery_timeout: float = 300.0
+    overlay_mode: str = 'auto'
 
 
 class ServeTerminateReplicaBody(RequestBody):

@@ -136,6 +136,65 @@ Deploying SkyPilot
 
       To enable shared access to a Kubernetes cluster, you can deploy a :ref:`SkyPilot API server <sky-api-server>`.
 
+Automating node discovery and cross-region networking
+-----------------------------------------------------
+
+If you maintain a dynamic inventory of machines, ``sky local up`` can retrieve
+nodes automatically using the ``--discovery`` flag. The discovery specification
+accepts multiple schemes:
+
+* ``file:///path/to/nodes.json`` – read a JSON or newline-separated list from
+  the local filesystem.
+* ``https://inventory.example.com/nodes`` – fetch JSON from an HTTP(S)
+  endpoint. The response can be a list of IP strings or objects.
+* ``exec://path/to/script --flags`` – execute a local program that prints a
+  JSON payload or newline-separated IPs.
+
+The JSON format supports rich metadata. Each entry may contain a
+``public_ip`` field (required), an optional ``internal_ip``, and a
+``metadata`` dictionary for annotations such as ``region``. Example response:
+
+.. code-block:: json
+
+   {
+     "nodes": [
+       {
+         "public_ip": "34.10.0.11",
+         "internal_ip": "10.128.0.5",
+         "metadata": {"region": "us-west"},
+         "is_head": true
+       },
+       {
+         "public_ip": "52.16.0.22",
+         "internal_ip": "10.54.0.8",
+         "metadata": {"region": "eu-west"}
+       }
+     ]
+   }
+
+To wait for a minimum number of machines before provisioning, combine
+``--discovery`` with ``--min-nodes`` (head node included) and optionally
+``--discovery-refresh`` / ``--discovery-timeout`` to control polling cadence:
+
+.. code-block:: bash
+
+   sky local up --discovery https://inventory.example.com/nodes \
+       --ssh-user $SSH_USER --ssh-key-path $SSH_KEY \
+       --min-nodes 8 --discovery-refresh 10 --discovery-timeout 600
+
+SkyPilot automatically infers when nodes span multiple regions and switches the
+k3s overlay to ``wireguard-native``. You can override the behaviour with
+``--overlay-mode``:
+
+.. code-block:: bash
+
+   sky local up --discovery file:///data/fleet.json --overlay-mode wireguard-native \
+       --ssh-user $SSH_USER --ssh-key-path $SSH_KEY
+
+Providing internal IPs in the discovery response allows SkyPilot to advertise
+those addresses inside the cluster while still joining via each node's public
+IP, enabling large pools that span different data centers or networks.
+
 What happens behind the scenes?
 -------------------------------
 

@@ -1065,34 +1065,77 @@ def local_up(gpus: bool,
              ssh_key: Optional[str],
              cleanup: bool,
              context_name: Optional[str] = None,
-             password: Optional[str] = None) -> None:
+             password: Optional[str] = None,
+             discovery: Optional[str] = None,
+             min_nodes: Optional[int] = None,
+             discovery_refresh: float = 5.0,
+             discovery_timeout: float = 300.0,
+             overlay_mode: str = 'auto') -> None:
     """Creates a local or remote cluster."""
 
-    def _validate_args(ips, ssh_user, ssh_key, cleanup):
-        # If any of --ips, --ssh-user, or --ssh-key-path is specified,
-        # all must be specified
-        if bool(ips) or bool(ssh_user) or bool(ssh_key):
-            if not (ips and ssh_user and ssh_key):
-                with ux_utils.print_exception_no_traceback():
-                    raise ValueError(
-                        'All ips, ssh_user, and ssh_key must be specified '
-                        'together.')
+    def _validate_args(ips, ssh_user, ssh_key, cleanup, discovery, min_nodes,
+                       discovery_refresh, discovery_timeout):
+        remote_requested = bool(ips or discovery or ssh_user or ssh_key)
+        if remote_requested and not (ssh_user and ssh_key):
+            with ux_utils.print_exception_no_traceback():
+                raise ValueError('ssh_user and ssh_key must be provided when '
+                                 'launching on remote machines.')
 
         # --cleanup can only be used if --ips, --ssh-user and --ssh-key-path
         # are all provided
-        if cleanup and not (ips and ssh_user and ssh_key):
+        if cleanup and not (ips or discovery):
             with ux_utils.print_exception_no_traceback():
                 raise ValueError(
-                    'cleanup can only be used with ips, ssh_user and ssh_key.')
+                    'cleanup can only be used when ips or discovery is '
+                    'specified alongside ssh credentials.')
 
-    _validate_args(ips, ssh_user, ssh_key, cleanup)
+        if min_nodes is not None and min_nodes <= 0:
+            with ux_utils.print_exception_no_traceback():
+                raise ValueError('--min-nodes must be a positive integer.')
+        if min_nodes and not discovery:
+            with ux_utils.print_exception_no_traceback():
+                raise ValueError('--min-nodes requires discovery to be set.')
+        if discovery_refresh <= 0:
+            with ux_utils.print_exception_no_traceback():
+                raise ValueError('--discovery-refresh must be positive.')
+        if discovery_timeout < 0:
+            with ux_utils.print_exception_no_traceback():
+                raise ValueError('--discovery-timeout must be >= 0.')
+
+    _validate_args(ips, ssh_user, ssh_key, cleanup, discovery, min_nodes,
+                   discovery_refresh, discovery_timeout)
+
+    overlay_mode = overlay_mode.lower() if overlay_mode else overlay_mode
 
     # If remote deployment arguments are specified, run remote up script
     if ips:
         assert ssh_user is not None and ssh_key is not None
-        kubernetes_deploy_utils.deploy_remote_cluster(ips, ssh_user, ssh_key,
-                                                      cleanup, context_name,
-                                                      password)
+        kubernetes_deploy_utils.deploy_remote_cluster(
+            ips,
+            ssh_user,
+            ssh_key,
+            cleanup,
+            context_name,
+            password,
+            discovery_spec=discovery,
+            discovery_min_nodes=min_nodes,
+            discovery_refresh_interval=discovery_refresh,
+            discovery_timeout=discovery_timeout,
+            overlay_mode=overlay_mode)
+    elif discovery:
+        assert ssh_user is not None and ssh_key is not None
+        kubernetes_deploy_utils.deploy_remote_cluster(
+            None,
+            ssh_user,
+            ssh_key,
+            cleanup,
+            context_name,
+            password,
+            discovery_spec=discovery,
+            discovery_min_nodes=min_nodes,
+            discovery_refresh_interval=discovery_refresh,
+            discovery_timeout=discovery_timeout,
+            overlay_mode=overlay_mode)
     else:
         # Run local deployment (kind) if no remote args are specified
         kubernetes_deploy_utils.deploy_local_cluster(gpus)
