@@ -1,6 +1,7 @@
 """Node registration helpers for SkyPilot."""
 from __future__ import annotations
 
+import concurrent.futures
 import dataclasses
 import json
 import subprocess
@@ -193,19 +194,45 @@ def collect_node_facts(
         ssh_user: str,
         ssh_key_path: str,
         connect_timeout: float = 10.0,
-        command_timeout: float = 20.0) -> Dict[str, NodeFacts]:
+        command_timeout: float = 20.0,
+        max_workers: Optional[int] = None) -> Dict[str, NodeFacts]:
     """Collects facts for each node in ``nodes``."""
 
+    if not nodes:
+        return {}
+
+    worker_limit = len(nodes)
+    if max_workers is not None:
+        worker_limit = max(1, min(worker_limit, max_workers))
+    else:
+        worker_limit = max(1, min(worker_limit, 32))
+
     results: Dict[str, NodeFacts] = {}
-    for node in nodes:
-        try:
-            facts = _collect_node_facts(node, ssh_user, ssh_key_path,
-                                        connect_timeout, command_timeout)
-        except NodeRegistrationError as exc:
-            logger.warning('Failed to gather metadata for %s: %s',
-                           node.public_ip, exc)
-            facts = NodeFacts(error=str(exc))
-        if facts.internal_ip is None:
-            facts.internal_ip = node.internal_ip
-        results[node.public_ip] = facts
+
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=worker_limit) as executor:
+        future_to_node = {
+            executor.submit(_collect_node_facts, node, ssh_user,
+                            ssh_key_path, connect_timeout, command_timeout):
+            node
+            for node in nodes
+        }
+
+        for future in concurrent.futures.as_completed(future_to_node):
+            node = future_to_node[future]
+            try:
+                facts = future.result()
+            except NodeRegistrationError as exc:
+                logger.warning('Failed to gather metadata for %s: %s',
+                               node.public_ip, exc)
+                facts = NodeFacts(error=str(exc))
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.exception('Unexpected error gathering metadata for %s',
+                                 node.public_ip)
+                facts = NodeFacts(error=str(exc))
+
+            if facts.internal_ip is None:
+                facts.internal_ip = node.internal_ip
+            results[node.public_ip] = facts
+
     return results
