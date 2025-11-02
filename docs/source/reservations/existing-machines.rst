@@ -242,8 +242,12 @@ SkyPilot automatically inspects each node for cloud metadata. Machines running
 on Alibaba Cloud, Tencent Cloud, ByteDance Volcengine, or DigitalOcean expose
 their provider, region, and instance identifiers, instance types, and VPC
 placement information, which are included under the ``metadata.cloud`` section
-of the payload when available. Provider-specific metadata (such as DigitalOcean
-network maps or Tencent Cloud MAC address hints) is merged under
+of the payload when available. The registration workflow now interrogates each
+provider's instance metadata service (e.g., Alibaba Cloud's ``latest/meta-data``
+API and Tencent Cloud's MAC-indexed metadata tree) to retrieve concrete
+attributes such as security groups, interface assignments, hostname aliases,
+and role details. Provider-specific metadata (such as DigitalOcean network maps
+or Tencent Cloud MAC address hints) is merged under
 ``metadata.cloud.provider_metadata``. This augments (but does not override) any
 metadata provided via discovery or ``--metadata``.
 

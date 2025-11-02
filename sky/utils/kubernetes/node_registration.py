@@ -44,7 +44,7 @@ _REMOTE_FACTS_SCRIPT = textwrap.dedent(
     import socket
     import subprocess
     import urllib.request
-    from typing import Dict, Optional
+    from typing import Dict, List, Optional
 
     result = {
         "hostname": None,
@@ -98,6 +98,12 @@ _REMOTE_FACTS_SCRIPT = textwrap.dedent(
                 return payload
         return None
 
+    def _split_lines(value: Optional[str]) -> Optional[List[str]]:
+        if value is None:
+            return None
+        entries = [item.strip() for item in value.splitlines() if item.strip()]
+        return entries or None
+
     def _detect_aliyun() -> Optional[Dict[str, Optional[str]]]:
         base = 'http://100.100.100.200/latest/meta-data/'
         region = _strip_or_none(_fetch_first(base, 'region-id', 'instance/region-id'))
@@ -111,10 +117,30 @@ _REMOTE_FACTS_SCRIPT = textwrap.dedent(
             _fetch_first(base, 'vswitch-id', 'instance/vswitch-id'))
         if not any([region, zone, instance_id, instance_type, vpc_id, vswitch_id]):
             return None
-        metadata: Dict[str, Optional[str]] = {}
-        mac = _strip_or_none(_safe_fetch(base + 'mac'))
-        if mac:
-            metadata['mac'] = mac
+        metadata: Dict[str, object] = {}
+        mac_list = _split_lines(_safe_fetch(base + 'mac'))
+        if mac_list:
+            metadata['mac_addresses'] = mac_list
+        hostname = _strip_or_none(
+            _fetch_first(base, 'hostname', 'instance/hostname'))
+        if hostname:
+            metadata['hostname'] = hostname
+        image_id = _strip_or_none(
+            _fetch_first(base, 'image-id', 'instance/image-id'))
+        if image_id:
+            metadata['image_id'] = image_id
+        sg_ids = _split_lines(
+            _fetch_first(base, 'security-group-ids',
+                         'instance/security-group-ids'))
+        if sg_ids:
+            metadata['security_group_ids'] = sg_ids
+        account_id = _strip_or_none(_safe_fetch(base + 'owner-account-id'))
+        if account_id:
+            metadata['account_id'] = account_id
+        ram_roles = _split_lines(
+            _safe_fetch(base + 'ram/security-credentials/'))
+        if ram_roles:
+            metadata['ram_roles'] = ram_roles
         return {
             'cloud': 'alibaba-cloud',
             'region': region,
@@ -136,10 +162,45 @@ _REMOTE_FACTS_SCRIPT = textwrap.dedent(
         subnet_id = _strip_or_none(_safe_fetch(base + 'subnet-id'))
         if not any([region, zone, instance_id, instance_type, vpc_id, subnet_id]):
             return None
-        metadata: Dict[str, Optional[str]] = {}
-        macs = _safe_fetch(base + 'network/interfaces/macs/')
+        metadata: Dict[str, object] = {}
+        instance_name = _strip_or_none(_safe_fetch(base + 'instance-name'))
+        if instance_name:
+            metadata['instance_name'] = instance_name
+        project_id = _strip_or_none(_safe_fetch(base + 'project-id'))
+        if project_id:
+            metadata['project_id'] = project_id
+        security_groups = _split_lines(
+            _safe_fetch(base + 'security-group'))
+        if security_groups:
+            metadata['security_groups'] = security_groups
+        macs = _split_lines(_safe_fetch(base + 'network/interfaces/macs/'))
         if macs:
-            metadata['macs_path'] = 'network/interfaces/macs/'
+            interfaces = []
+            for mac in macs:
+                mac_key = mac.strip('/')
+                if not mac_key:
+                    continue
+                prefix = base + f'network/interfaces/macs/{mac_key}/'
+                interface_entry: Dict[str, Optional[str]] = {
+                    'mac': mac_key,
+                    'primary': _strip_or_none(
+                        _safe_fetch(prefix + 'primary')),
+                    'gateway': _strip_or_none(
+                        _safe_fetch(prefix + 'gateway')),
+                }
+                local_ips = _split_lines(_safe_fetch(prefix + 'local-ipv4s'))
+                if local_ips:
+                    interface_entry['local_ipv4s'] = local_ips
+                public_ips = _split_lines(_safe_fetch(prefix + 'public-ipv4s'))
+                if public_ips:
+                    interface_entry['public_ipv4s'] = public_ips
+                interface_entry['subnet_id'] = _strip_or_none(
+                    _safe_fetch(prefix + 'subnet-id'))
+                interface_entry['vpc_id'] = _strip_or_none(
+                    _safe_fetch(prefix + 'vpc-id'))
+                interfaces.append(interface_entry)
+            if interfaces:
+                metadata['interfaces'] = interfaces
         return {
             'cloud': 'tencent-cloud',
             'region': region,
@@ -161,6 +222,16 @@ _REMOTE_FACTS_SCRIPT = textwrap.dedent(
         subnet_id = _strip_or_none(_safe_fetch(base + 'subnet-id'))
         if not any([region, zone, instance_id, instance_type, vpc_id, subnet_id]):
             return None
+        metadata: Dict[str, object] = {}
+        sg_ids = _split_lines(_safe_fetch(base + 'security-group-ids'))
+        if sg_ids:
+            metadata['security_group_ids'] = sg_ids
+        project_id = _strip_or_none(_safe_fetch(base + 'project-id'))
+        if project_id:
+            metadata['project_id'] = project_id
+        instance_name = _strip_or_none(_safe_fetch(base + 'instance-name'))
+        if instance_name:
+            metadata['instance_name'] = instance_name
         return {
             'cloud': 'volcengine',
             'region': region,
@@ -169,6 +240,7 @@ _REMOTE_FACTS_SCRIPT = textwrap.dedent(
             'instance_type': instance_type,
             'vpc_id': vpc_id,
             'subnet_id': subnet_id,
+            'metadata': metadata,
         }
 
     def _detect_digitalocean() -> Optional[Dict[str, Optional[str]]]:
@@ -187,13 +259,19 @@ _REMOTE_FACTS_SCRIPT = textwrap.dedent(
             instance_id = _strip_or_none(str(instance_id))
         if not any([region, instance_id]):
             return None
-        metadata: Dict[str, Optional[str]] = {}
+        metadata: Dict[str, object] = {}
         features = data.get('features')
         if isinstance(features, list):
             metadata['features'] = features
         networks = data.get('networks')
         if isinstance(networks, dict):
             metadata['networks'] = networks
+        tags = data.get('tags')
+        if isinstance(tags, list):
+            metadata['tags'] = tags
+        hostname = data.get('hostname')
+        if isinstance(hostname, str) and hostname.strip():
+            metadata['hostname'] = hostname.strip()
         return {
             'cloud': 'digitalocean',
             'region': region,
